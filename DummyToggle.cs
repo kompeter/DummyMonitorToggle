@@ -193,6 +193,9 @@ static class Program
                     return 0;
                 case "toggle":
                     bool now = Set(null);
+                    // Attaching a display can blank every screen for a moment while they resync;
+                    // wait so the banner isn't shown to a black screen.
+                    if (now) Thread.Sleep(1500);
                     Flash(monitorName + (now ? ": ON" : ": OFF"), now);
                     return 0;
                 default:
@@ -577,7 +580,7 @@ static class Program
             Font font = new Font("Segoe UI", 16f, FontStyle.Bold);
             f.ClientSize = new Size(Math.Max(320, TextRenderer.MeasureText(text, font).Width + 60), 70);
             f.StartPosition = FormStartPosition.Manual;
-            Rectangle wa = Screen.PrimaryScreen.WorkingArea;
+            Rectangle wa = Screen.FromPoint(Cursor.Position).WorkingArea; // the screen the user is looking at
             f.Location = new Point(wa.Left + (wa.Width - f.Width) / 2, wa.Bottom - f.Height - 60);
 
             Label l = new Label();
@@ -589,7 +592,7 @@ static class Program
             f.Controls.Add(l);
 
             System.Windows.Forms.Timer t = new System.Windows.Forms.Timer();
-            t.Interval = 1400;
+            t.Interval = on ? 2500 : 1400;
             t.Tick += delegate { t.Stop(); f.Close(); };
             f.Shown += delegate { t.Start(); };
             Application.Run(f);
