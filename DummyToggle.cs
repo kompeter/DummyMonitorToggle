@@ -77,7 +77,8 @@ static class Program
     static extern int SetDisplayConfig(uint numPaths, IntPtr paths, uint numModes, IntPtr modes, uint flags);
 
     const uint EDD_GET_DEVICE_INTERFACE_NAME = 0x1;
-    const int DISPLAY_DEVICE_ATTACHED_TO_DESKTOP = 0x1;
+    const int DISPLAY_DEVICE_ATTACHED_TO_DESKTOP = 0x1; // on an output
+    const int DISPLAY_DEVICE_ACTIVE = 0x1;              // on a monitor
     const int DISPLAY_DEVICE_PRIMARY_DEVICE = 0x4;
     const int DM_POSITION = 0x20, DM_PELSWIDTH = 0x80000, DM_PELSHEIGHT = 0x100000;
     const uint CDS_UPDATEREGISTRY = 0x1, CDS_NORESET = 0x10000000;
@@ -183,6 +184,7 @@ static class Program
     {
         output = null;
         attached = primary = false;
+        bool found = false;
 
         DISPLAY_DEVICE adapter = new DISPLAY_DEVICE();
         adapter.cb = Marshal.SizeOf(typeof(DISPLAY_DEVICE));
@@ -194,16 +196,22 @@ static class Program
             {
                 // DeviceID is \\?\DISPLAY#GSM5B7F#5&...#{guid}; the saved id is DISPLAY\GSM5B7F\5&...
                 string devId = (mon.DeviceID ?? "").Replace('#', '\\');
-                if (devId.IndexOf(id, StringComparison.OrdinalIgnoreCase) >= 0)
+                if (devId.IndexOf(id, StringComparison.OrdinalIgnoreCase) < 0) continue;
+
+                // A detached monitor can be listed under another monitor's output, so only trust
+                // the output when the dummy itself is flagged active on it.
+                found = true;
+                if ((mon.StateFlags & DISPLAY_DEVICE_ACTIVE) != 0 &&
+                    (adapter.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP) != 0)
                 {
                     output = adapter.DeviceName;
-                    attached = (adapter.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP) != 0;
+                    attached = true;
                     primary = (adapter.StateFlags & DISPLAY_DEVICE_PRIMARY_DEVICE) != 0;
                     return true;
                 }
             }
         }
-        return false;
+        return found;
     }
 
     // Returns the new state. want == null means toggle.
@@ -228,7 +236,7 @@ static class Program
         }
         else
         {
-            if (!found) return false; // not listed at all, so it is not part of the desktop
+            if (!attached) return false;
             if (primary)
                 throw new Exception("The dummy is currently the main display. Switch back to your real monitor first.");
 
