@@ -576,7 +576,7 @@ static class Program
             f.FormBorderStyle = FormBorderStyle.None;
             f.ShowInTaskbar = false;
             f.TopMost = true;
-            f.BackColor = on ? Color.FromArgb(30, 120, 60) : Color.FromArgb(60, 60, 60);
+            f.BackColor = on ? Color.FromArgb(30, 120, 60) : Color.FromArgb(170, 40, 40);
             Font font = new Font("Segoe UI", 16f, FontStyle.Bold);
             f.ClientSize = new Size(Math.Max(320, TextRenderer.MeasureText(text, font).Width + 60), 70);
             f.StartPosition = FormStartPosition.Manual;
