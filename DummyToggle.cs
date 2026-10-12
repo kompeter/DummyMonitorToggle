@@ -1,31 +1,27 @@
-// DummyToggle - enables/disables one monitor device (the dummy HDMI plug),
-// the same thing Device Manager's "Disable device" does.
+// DummyToggle - attaches/detaches one monitor (the dummy HDMI plug) to the Windows desktop,
+// the same thing "Extend" / "Disconnect this display" in Display settings do. No admin needed.
 //
 //   DummyToggle.exe            first run: setup. Afterwards: toggle.
 //   DummyToggle.exe on|off     silent, for scripts (Sunshine do/undo). Errors go to DummyToggle.log
 //   DummyToggle.exe toggle     toggle and flash the new state on screen
 //   DummyToggle.exe setup      pick the dummy monitor again and recreate the shortcut
-//   DummyToggle.exe uninstall  remove the scheduled task and desktop shortcut
+//   DummyToggle.exe uninstall  remove the desktop shortcut
 //
 // Written against C# 5 so the csc.exe that ships with Windows can build it (see build.cmd).
 
 using System;
 using System.Collections.Generic;
-using System.ComponentModel;
-using System.Diagnostics;
 using System.Drawing;
 using System.IO;
 using System.Management;
 using System.Reflection;
 using System.Runtime.InteropServices;
-using System.Security.Principal;
 using System.Text;
 using System.Threading;
 using System.Windows.Forms;
 
 static class Program
 {
-    const string TaskName = "DummyMonitorToggle";
     const string ShortcutName = "Dummy HDMI Toggle.lnk";
 
     static readonly string ExePath = Assembly.GetExecutingAssembly().Location;
@@ -37,16 +33,54 @@ static class Program
     {
         public string Id;
         public string Name;
-        public bool Enabled;
 
         public override string ToString()
         {
-            return (Enabled ? "[on]   " : "[off]  ") + Name + "   -   " + Id;
+            return Name + "   -   " + Id;
         }
     }
 
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    struct DISPLAY_DEVICE
+    {
+        public int cb;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string DeviceName;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)] public string DeviceString;
+        public int StateFlags;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)] public string DeviceID;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)] public string DeviceKey;
+    }
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    struct DEVMODE
+    {
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string dmDeviceName;
+        public short dmSpecVersion, dmDriverVersion, dmSize, dmDriverExtra;
+        public int dmFields;
+        public int dmPositionX, dmPositionY;
+        public int dmDisplayOrientation, dmDisplayFixedOutput;
+        public short dmColor, dmDuplex, dmYResolution, dmTTOption, dmCollate;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string dmFormName;
+        public short dmLogPixels;
+        public int dmBitsPerPel, dmPelsWidth, dmPelsHeight, dmDisplayFlags, dmDisplayFrequency;
+        public int dmICMMethod, dmICMIntent, dmMediaType, dmDitherType, dmReserved1, dmReserved2;
+        public int dmPanningWidth, dmPanningHeight;
+    }
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    static extern bool EnumDisplayDevices(string device, uint index, ref DISPLAY_DEVICE dd, uint flags);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    static extern int ChangeDisplaySettingsEx(string device, ref DEVMODE mode, IntPtr hwnd, uint flags, IntPtr param);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    static extern int ChangeDisplaySettingsEx(string device, IntPtr mode, IntPtr hwnd, uint flags, IntPtr param);
     [DllImport("user32.dll")]
     static extern int SetDisplayConfig(uint numPaths, IntPtr paths, uint numModes, IntPtr modes, uint flags);
+
+    const uint EDD_GET_DEVICE_INTERFACE_NAME = 0x1;
+    const int DISPLAY_DEVICE_ATTACHED_TO_DESKTOP = 0x1;
+    const int DISPLAY_DEVICE_PRIMARY_DEVICE = 0x4;
+    const int DM_POSITION = 0x20, DM_PELSWIDTH = 0x80000, DM_PELSHEIGHT = 0x100000;
+    const uint CDS_UPDATEREGISTRY = 0x1, CDS_NORESET = 0x10000000;
     const uint SDC_TOPOLOGY_EXTEND = 0x00000004;
     const uint SDC_APPLY = 0x00000080;
 
@@ -54,10 +88,6 @@ static class Program
     static int Main(string[] args)
     {
         string cmd = args.Length > 0 ? args[0].ToLowerInvariant().TrimStart('-', '/') : "";
-
-        // Enabling/disabling a device needs admin rights.
-        if (!IsAdmin())
-            return Elevate(args);
 
         bool silent = cmd == "on" || cmd == "off";
         Application.EnableVisualStyles();
@@ -98,33 +128,6 @@ static class Program
         }
     }
 
-    // ---- elevation -------------------------------------------------------
-
-    static bool IsAdmin()
-    {
-        using (WindowsIdentity id = WindowsIdentity.GetCurrent())
-            return new WindowsPrincipal(id).IsInRole(WindowsBuiltInRole.Administrator);
-    }
-
-    static int Elevate(string[] args)
-    {
-        ProcessStartInfo psi = new ProcessStartInfo(ExePath, string.Join(" ", args));
-        psi.UseShellExecute = true;
-        psi.Verb = "runas";
-        try
-        {
-            using (Process p = Process.Start(psi))
-            {
-                p.WaitForExit();
-                return p.ExitCode;
-            }
-        }
-        catch (Win32Exception)
-        {
-            return 1; // UAC prompt declined
-        }
-    }
-
     // ---- monitors --------------------------------------------------------
 
     static List<Mon> GetMonitors()
@@ -159,7 +162,7 @@ static class Program
 
         List<Mon> list = new List<Mon>();
         using (ManagementObjectSearcher s = new ManagementObjectSearcher(
-            "SELECT Name, PNPDeviceID, ConfigManagerErrorCode FROM Win32_PnPEntity WHERE PNPClass = 'Monitor'"))
+            "SELECT Name, PNPDeviceID FROM Win32_PnPEntity WHERE PNPClass = 'Monitor'"))
         {
             foreach (ManagementObject o in s.Get())
             {
@@ -169,18 +172,38 @@ static class Program
                 m.Name = (o["Name"] as string) ?? "Monitor";
                 string nice;
                 if (friendly.TryGetValue(m.Id, out nice)) m.Name = nice;
-                m.Enabled = Convert.ToInt32(o["ConfigManagerErrorCode"] ?? 0) != 22; // 22 = disabled
                 list.Add(m);
             }
         }
         return list;
     }
 
-    static Mon Find(List<Mon> list, string id)
+    // Looks up the output (\\.\DISPLAYn) the dummy hangs off. Returns false if Windows doesn't list it.
+    static bool FindOutput(string id, out string output, out bool attached, out bool primary)
     {
-        foreach (Mon m in list)
-            if (string.Equals(m.Id, id, StringComparison.OrdinalIgnoreCase)) return m;
-        return null;
+        output = null;
+        attached = primary = false;
+
+        DISPLAY_DEVICE adapter = new DISPLAY_DEVICE();
+        adapter.cb = Marshal.SizeOf(typeof(DISPLAY_DEVICE));
+        for (uint i = 0; EnumDisplayDevices(null, i, ref adapter, 0); i++)
+        {
+            DISPLAY_DEVICE mon = new DISPLAY_DEVICE();
+            mon.cb = Marshal.SizeOf(typeof(DISPLAY_DEVICE));
+            for (uint j = 0; EnumDisplayDevices(adapter.DeviceName, j, ref mon, EDD_GET_DEVICE_INTERFACE_NAME); j++)
+            {
+                // DeviceID is \\?\DISPLAY#GSM5B7F#5&...#{guid}; the saved id is DISPLAY\GSM5B7F\5&...
+                string devId = (mon.DeviceID ?? "").Replace('#', '\\');
+                if (devId.IndexOf(id, StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    output = adapter.DeviceName;
+                    attached = (adapter.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP) != 0;
+                    primary = (adapter.StateFlags & DISPLAY_DEVICE_PRIMARY_DEVICE) != 0;
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     // Returns the new state. want == null means toggle.
@@ -190,58 +213,43 @@ static class Program
             throw new Exception("No dummy monitor chosen yet. Run DummyToggle.exe with no arguments first.");
         string id = File.ReadAllText(ConfigPath).Trim();
 
-        List<Mon> all = GetMonitors();
-        Mon dummy = Find(all, id);
-        if (dummy == null)
-            throw new Exception("The saved dummy monitor was not found:\n" + id +
-                "\n\nIs the plug still in the same port? Run \"DummyToggle.exe setup\" to pick it again.");
+        string output;
+        bool attached, primary;
+        bool found = FindOutput(id, out output, out attached, out primary);
 
-        bool on = want ?? !dummy.Enabled;
-        if (dummy.Enabled == on) return on;
+        bool on = want ?? !attached;
+        if (found && attached == on) return on;
 
-        if (!on)
+        if (on)
         {
-            bool otherOn = false;
-            foreach (Mon m in all)
-                if (m != dummy && m.Enabled) otherOn = true;
-            if (!otherOn)
-                throw new Exception("Refusing to disable the dummy: no other monitor is enabled.");
+            int rc = SetDisplayConfig(0, IntPtr.Zero, 0, IntPtr.Zero, SDC_APPLY | SDC_TOPOLOGY_EXTEND);
+            if (rc != 0)
+                throw new Exception("Windows refused to extend the desktop (error " + rc + ").");
+        }
+        else
+        {
+            if (!found) return false; // not listed at all, so it is not part of the desktop
+            if (primary)
+                throw new Exception("The dummy is currently the main display. Switch back to your real monitor first.");
+
+            DEVMODE dm = new DEVMODE();
+            dm.dmSize = (short)Marshal.SizeOf(typeof(DEVMODE));
+            dm.dmFields = DM_POSITION | DM_PELSWIDTH | DM_PELSHEIGHT; // 0x0 at 0,0 = detach
+            int rc = ChangeDisplaySettingsEx(output, ref dm, IntPtr.Zero, CDS_UPDATEREGISTRY | CDS_NORESET, IntPtr.Zero);
+            if (rc == 0)
+                rc = ChangeDisplaySettingsEx(null, IntPtr.Zero, IntPtr.Zero, 0, IntPtr.Zero);
+            if (rc != 0)
+                throw new Exception("Windows refused to detach the dummy (error " + rc + ").");
         }
 
-        string output = PnpUtil(on, id);
-
-        for (int i = 0; i < 40; i++) // up to 10 s
+        for (int i = 0; i < 20; i++) // up to 5 s
         {
             Thread.Sleep(250);
-            Mon m = Find(GetMonitors(), id);
-            if ((m == null && !on) || (m != null && m.Enabled == on))
-            {
-                if (on)
-                {
-                    // Give Windows a moment to see the display, then make sure it is part of the desktop.
-                    Thread.Sleep(1000);
-                    SetDisplayConfig(0, IntPtr.Zero, 0, IntPtr.Zero, SDC_APPLY | SDC_TOPOLOGY_EXTEND);
-                }
+            if (FindOutput(id, out output, out attached, out primary) ? attached == on : !on)
                 return on;
-            }
         }
-        throw new Exception("Could not " + (on ? "enable" : "disable") + " the dummy monitor.\n\npnputil said:\n" + output);
-    }
-
-    static string PnpUtil(bool enable, string id)
-    {
-        ProcessStartInfo psi = new ProcessStartInfo(
-            Path.Combine(Environment.SystemDirectory, "pnputil.exe"),
-            (enable ? "/enable-device" : "/disable-device") + " \"" + id + "\"");
-        psi.UseShellExecute = false;
-        psi.CreateNoWindow = true;
-        psi.RedirectStandardOutput = true;
-        using (Process p = Process.Start(psi))
-        {
-            string output = p.StandardOutput.ReadToEnd();
-            p.WaitForExit();
-            return output.Trim();
-        }
+        throw new Exception("The dummy monitor did not turn " + (on ? "on" : "off") +
+            ".\n\nIf it is disabled in Device Manager, enable it there, then run \"DummyToggle.exe setup\" again.");
     }
 
     // ---- setup -----------------------------------------------------------
@@ -252,23 +260,16 @@ static class Program
         if (id == null) return 1;
         File.WriteAllText(ConfigPath, id);
 
-        // A scheduled task with "highest privileges" lets the shortcut toggle without a UAC prompt.
-        string err = Run("schtasks.exe", "/create /f /tn \"" + TaskName + "\" /tr \"\\\"" + ExePath +
-            "\\\" toggle\" /sc once /st 00:00 /rl highest");
-        if (err != null)
-            throw new Exception("Could not create the scheduled task:\n" + err);
-
         dynamic shell = Activator.CreateInstance(Type.GetTypeFromProgID("WScript.Shell"));
         dynamic lnk = shell.CreateShortcut(ShortcutPath());
-        lnk.TargetPath = Path.Combine(Environment.SystemDirectory, "schtasks.exe");
-        lnk.Arguments = "/run /tn \"" + TaskName + "\"";
-        lnk.WindowStyle = 7; // minimized, so no console window pops up
+        lnk.TargetPath = ExePath;
+        lnk.Arguments = "toggle";
         lnk.IconLocation = Path.Combine(Environment.SystemDirectory, "shell32.dll") + ",15";
         lnk.Description = "Turn the dummy HDMI monitor on/off";
         lnk.Save();
 
         MessageBox.Show("Done.\n\nA shortcut \"Dummy HDMI Toggle\" is on your desktop. Double-click it to turn the " +
-            "dummy monitor on or off (no admin prompt). You can move it or pin it wherever you like.\n\n" +
+            "dummy monitor on or off. You can move it or pin it wherever you like.\n\n" +
             "Don't move DummyToggle.exe afterwards - if you do, run \"DummyToggle.exe setup\" again.",
             "DummyToggle", MessageBoxButtons.OK, MessageBoxIcon.Information);
         return 0;
@@ -276,30 +277,13 @@ static class Program
 
     static void Uninstall()
     {
-        Run("schtasks.exe", "/delete /f /tn \"" + TaskName + "\"");
         if (File.Exists(ShortcutPath())) File.Delete(ShortcutPath());
-        MessageBox.Show("Scheduled task and desktop shortcut removed.", "DummyToggle");
+        MessageBox.Show("Desktop shortcut removed.", "DummyToggle");
     }
 
     static string ShortcutPath()
     {
         return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), ShortcutName);
-    }
-
-    // Returns null on success, otherwise the tool's output.
-    static string Run(string exe, string arguments)
-    {
-        ProcessStartInfo psi = new ProcessStartInfo(Path.Combine(Environment.SystemDirectory, exe), arguments);
-        psi.UseShellExecute = false;
-        psi.CreateNoWindow = true;
-        psi.RedirectStandardOutput = true;
-        psi.RedirectStandardError = true;
-        using (Process p = Process.Start(psi))
-        {
-            string output = p.StandardOutput.ReadToEnd() + p.StandardError.ReadToEnd();
-            p.WaitForExit();
-            return p.ExitCode == 0 ? null : output.Trim();
-        }
     }
 
     static string Pick()
